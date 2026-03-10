@@ -15,6 +15,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { useAppStore } from '@/lib/stores/app-store';
 import ReactJoyride, { CallBackProps, Step } from 'react-joyride';
 import { pushSync, setCredential, getCredential, deleteCredential, hasCredential } from '@/lib/electron-sync';
+import { isElectronAvailable, getLocalBackupPath, readLocalBackup, writeLocalBackup } from '@/lib/electron-storage';
 
 export default function Settings() {
   const { theme, setTheme } = useTheme();
@@ -50,6 +51,10 @@ export default function Settings() {
   const [mongoUriInput, setMongoUriInput] = useState('');
   const [credStatus, setCredStatus] = useState<'unknown'|'present'|'absent'>('unknown');
   const [credLoading, setCredLoading] = useState(false);
+  const [localBackupPath, setLocalBackupPath] = useState<string | null>(null);
+  const [localBackupBusy, setLocalBackupBusy] = useState(false);
+  const [localBackupStatus, setLocalBackupStatus] = useState<string | null>(null);
+  const electronAvailable = isElectronAvailable();
 
   useEffect(() => {
     loadData();
@@ -136,6 +141,13 @@ export default function Settings() {
     setMounted(true);
   }, []);
 
+  useEffect(() => {
+    if (!isElectronAvailable()) return;
+    getLocalBackupPath()
+      .then((p) => setLocalBackupPath(p))
+      .catch(() => {});
+  }, []);
+
   // expose simple import helpers to the global window so the import parser can call them
   useEffect(() => {
     (window as any).__importAddCourse = async (c: any) => {
@@ -192,23 +204,27 @@ export default function Settings() {
   await updateSettings({ semesters: updatedSemesters });
   };
 
-  const exportData = (format?: 'json'|'csv'|'xlsx') => {
-    const fmt = format || exportFormat;
+  const buildExportPayload = () => {
     const payloadSettings = exportIncludeSemesters ? settings : undefined;
-
-    // select data scope
     const activeSemId = settings?.activeSemesterId;
     const scopeCourses = exportScope === 'all' ? courses : courses.filter(c => c.semesterId === activeSemId);
     const scopeTasks = exportScope === 'all' ? tasks : tasks.filter(t => t.semesterId === activeSemId);
+    return {
+      courses: scopeCourses,
+      tasks: scopeTasks,
+      settings: payloadSettings,
+      exportDate: new Date().toISOString(),
+      version: '1.0'
+    };
+  };
+
+  const exportData = (format?: 'json'|'csv'|'xlsx') => {
+    const fmt = format || exportFormat;
+    const payload = buildExportPayload();
+    const scopeCourses = payload.courses || [];
+    const scopeTasks = payload.tasks || [];
 
     if (fmt === 'json') {
-      const payload = {
-        courses: scopeCourses,
-        tasks: scopeTasks,
-        settings: payloadSettings,
-        exportDate: new Date().toISOString(),
-        version: '1.0'
-      };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a'); a.href = url; a.download = `studydash-export-${new Date().toISOString().split('T')[0]}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
@@ -239,6 +255,55 @@ export default function Settings() {
     XLSX.utils.book_append_sheet(wb, wsCourses, 'courses');
     XLSX.utils.book_append_sheet(wb, wsTasks, 'tasks');
     XLSX.writeFile(wb, `studydash-export-${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
+  const saveLocalBackup = async () => {
+    if (!isElectronAvailable()) {
+      alert('Local backup is only available in the desktop app.');
+      return;
+    }
+    setLocalBackupBusy(true);
+    setLocalBackupStatus(null);
+    try {
+      const payload = buildExportPayload();
+      const res = await writeLocalBackup(payload);
+      setLocalBackupStatus(res?.path ? `Saved to ${res.path}` : 'Saved');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to save local backup.');
+    } finally {
+      setLocalBackupBusy(false);
+    }
+  };
+
+  const loadLocalBackup = async () => {
+    if (!isElectronAvailable()) {
+      alert('Local backup is only available in the desktop app.');
+      return;
+    }
+    setLocalBackupBusy(true);
+    setLocalBackupStatus(null);
+    try {
+      const data = await readLocalBackup();
+      if (!data) {
+        alert('No local backup found.');
+        return;
+      }
+      const courses = Array.isArray(data.courses) ? data.courses : [];
+      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+      setPreviewData({ courses, tasks });
+      setSelectedPreview({
+        courses: new Set(courses.map((_: any, i: number) => i)),
+        tasks: new Set(tasks.map((_: any, i: number) => i))
+      });
+      setPreviewOpen(true);
+      setLocalBackupStatus('Loaded local backup into preview.');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to load local backup.');
+    } finally {
+      setLocalBackupBusy(false);
+    }
   };
 
   const downloadSample = (type: 'json' | 'csv' | 'xlsx') => {
@@ -813,6 +878,29 @@ export default function Settings() {
                   <div className="text-sm text-muted-foreground">Status: {credStatus}</div>
                 </div>
               </div>
+            </div>
+
+            {/* Local backup section (Electron) */}
+            <div className="p-3 border rounded">
+              <h4 className="font-semibold mb-2">Local Backup (Desktop)</h4>
+              <p className="text-sm text-muted-foreground mb-3">Save a backup to this computer&apos;s app data folder.</p>
+              {localBackupPath && (
+                <div className="text-xs text-muted-foreground mb-2">Path: {localBackupPath}</div>
+              )}
+              <div className="flex gap-2">
+                <Button onClick={saveLocalBackup} disabled={!electronAvailable || localBackupBusy} className="flex-1">
+                  {localBackupBusy ? 'Working...' : 'Save Backup'}
+                </Button>
+                <Button onClick={loadLocalBackup} disabled={!electronAvailable || localBackupBusy} variant="secondary" className="flex-1">
+                  {localBackupBusy ? 'Working...' : 'Restore Backup'}
+                </Button>
+              </div>
+              {localBackupStatus && (
+                <div className="text-xs text-muted-foreground mt-2">{localBackupStatus}</div>
+              )}
+              {!electronAvailable && (
+                <div className="text-xs text-muted-foreground mt-2">Available in the desktop app.</div>
+              )}
             </div>
 
             {/* Import section */}

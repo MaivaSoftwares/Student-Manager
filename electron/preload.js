@@ -16,5 +16,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   hasCredential: async (service, account) => {
     return await ipcRenderer.invoke('credentials:has', { service, account });
+  },
+  // local backup file helpers
+  getLocalBackupPath: async () => {
+    return await ipcRenderer.invoke('storage:path');
+  },
+  readLocalBackup: async () => {
+    return await ipcRenderer.invoke('storage:read');
+  },
+  writeLocalBackup: async (payload) => {
+    return await ipcRenderer.invoke('storage:write', payload);
   }
 });
